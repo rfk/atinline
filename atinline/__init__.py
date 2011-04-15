@@ -161,6 +161,8 @@ def find_caller(depth):
     return (None,None,None)
 
 
+_ALREADY_INLINED = set()
+
 def _inlineme(func):
     """Helper function to inline code at its call site.
 
@@ -171,16 +173,6 @@ def _inlineme(func):
     It exits without making any changes if it can't prove that the function
     is being called correctly.
     """
-    #  The function to be inlined should be executing at depth 2.
-    #  If we can't find it, bail out.
-    (frame,namespace,name) = find_caller(2)
-    if name is None:
-        return
-    try:
-        if lookup_in_namespace(name,namespace) != func:
-            return
-    except (KeyError,AttributeError):
-        return
     #  The function to be inlined into should be executing at depth 3.
     #  If it's not there or not a function, bail out.
     (_,namespace,name) = find_caller(3)
@@ -192,14 +184,29 @@ def _inlineme(func):
         return
     if type(caller) != type(_inlineme):
         return
+    #  The function to be inlined should be executing at depth 2.
+    #  If we can't find it, bail out.
+    #  If we already failed to inlne it, bail out.
+    (frame,namespace,name) = find_caller(2)
+    if name is None:
+        return
+    if (caller,frame.f_lasti) in _ALREADY_INLINED:
+        return
+    try:
+        if lookup_in_namespace(name,namespace) != func:
+            return
+    except (KeyError,AttributeError):
+        return
     #  Verify that the code we're inlining is the code being executed.
     code = caller.func_code
     if frame.f_code != code:
+        _ALREADY_INLINED.add((caller,frame.f_lasti))
         return
-    #  Grab the bytecode up to call of target function.
+    #  Grab the bytecode for callsite of target function.
     (c,callsite) = make_code_from_frame(frame)
     #  Double-check that we're inlining at the site of a CALL_FUNCTION.
     if c.code[callsite][0] != CALL_FUNCTION:
+        _ALREADY_INLINED.add((caller,frame.f_lasti))
         return
     #  Skip backwards over loading of arguments, to find the site where
     #  the target function is loaded.
@@ -222,6 +229,7 @@ def _inlineme(func):
     try:
         name_map = _rename_local_vars(source_code,func)
     except ValueError:
+        _ALREADY_INLINED.add((caller,frame.f_lasti))
         return
     #  Remove any setlineno ops from the source and dest bytecode.
     #  Also remove 4-code stub that calls into _inlineme.
@@ -233,6 +241,7 @@ def _inlineme(func):
     #  Keyword args are currently not supported.
     numargs = dest_code.code[callsite][1] & 0xFF
     if numargs != dest_code.code[callsite][1]:
+        _ALREADY_INLINED.add((caller,frame.f_lasti))
         return
     for i in xrange(numargs):
         argname = func.func_code.co_varnames[i]
@@ -259,6 +268,7 @@ def _inlineme(func):
     #  An simple optimisation pass would be awsome here, the above
     #  generates a lot of redundant loads, stores and jumps.
     caller.func_code = dest_code.to_code()
+    _ALREADY_INLINED.add((caller,frame.f_lasti))
  
 
 def _ids():
