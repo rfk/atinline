@@ -71,6 +71,8 @@ __version__ = "%d.%d.%d%s" % (__ver_major__,__ver_minor__,__ver_patch__,__ver_su
 import sys
 import new
 import timeit
+import dis
+from dis import HAVE_ARGUMENT, findlabels
 from byteplay import *
 
 
@@ -91,6 +93,31 @@ def inline(func):
     func.func_code = c.to_code()
     return func
 
+
+def make_code_from_frame(frame):
+    """Make a Code object from the given frame.
+
+    Returns a two-tuple giving the Code object, and the offset of the
+    last instruction executed by the frame.
+    """
+    code = frame.f_code
+    offset = i = 0
+    while i < frame.f_lasti:
+        offset += 1
+        if ord(code.co_code[i]) < HAVE_ARGUMENT:
+            i += 1
+        else:
+            i += 3
+    assert i == frame.f_lasti
+    for j in findlabels(code.co_code):
+        if j <= frame.f_lasti:
+            offset += 1
+    c = Code.from_code(code)
+    c.code[:] = [op for op in c.code if op[0] != SetLineno]
+    assert c.code[offset][0] == ord(code.co_code[frame.f_lasti])
+    return (c,offset)
+
+
 def find_caller(depth):
     """Find the calling function at the specified depth.
 
@@ -102,37 +129,35 @@ def find_caller(depth):
     """
     #  Find the calling frame and corresponding code object.
     frame = sys._getframe(depth+1)
-    code = frame.f_code
-    #  Get the calling byte code up to the current call site.
-    new_code = new.code(0, code.co_nlocals,
-                           code.co_stacksize, code.co_flags,
-                           code.co_code[:frame.f_lasti+3], code.co_consts,
-                           code.co_names, code.co_varnames,
-                           code.co_filename, "",
-                           frame.f_lineno, code.co_lnotab)
-    c = Code.from_code(new_code)
+    (c,callsite) = make_code_from_frame(frame)
+    if c.code[callsite][0] not in (CALL_FUNCTION,):
+        return (None,None,None)
     #  Skip over the CALL_FUNCTION bytecode, as well as the bytecodes
     #  loading any arguments, to find the instruction loading the func.
-    numargs = c.code[-1][1]
-    idx = -2
+    numargs = c.code[callsite][1]
+    loadsite = callsite - 1
     while numargs > 0:
         #  This little loop is to handle calls like func(x.y.z) where
         #  there are multiple instructions used to load a single argument.
         #  We keep moving backwards until the stack-effect is to push
         #  a single item.
-        (npop,npush) = getse(*c.code[idx])
+        (npop,npush) = getse(*c.code[loadsite])
         while npush - npop != 1:
-            idx -= 1
-            npop += getse(*c.code[idx])[0]
-            npush += getse(*c.code[idx])[1]
+            loadsite -= 1
+            npop += getse(*c.code[loadsite])[0]
+            npush += getse(*c.code[loadsite])[1]
         numargs -= 1
-        idx -=1
+        loadsite -= 1
     #  Now branch based on how the function was loaded.
-    #  Currently only load-by-name is supported.
-    if c.code[idx][0] in (LOAD_GLOBAL,LOAD_NAME,):
-        return (frame,frame.f_globals,c.code[idx][1])
-    if c.code[idx][0] in (LOAD_FAST,):
-        return (frame,frame.f_locals,c.code[idx][1])
+    #  We support basic lookups, and attribute-based lookups.
+    name = ""
+    while c.code[loadsite][0] in (LOAD_ATTR,):
+        name = "." + c.code[loadsite][1] + name
+        loadsite -= 1
+    if c.code[loadsite][0] in (LOAD_GLOBAL,LOAD_NAME,):
+        return (frame,frame.f_globals,c.code[loadsite][1] + name)
+    if c.code[loadsite][0] in (LOAD_FAST,):
+        return (frame,frame.f_locals,c.code[loadsite][1] + name)
     return (None,None,None)
 
 
@@ -152,9 +177,9 @@ def _inlineme(func):
     if name is None:
         return
     try:
-        if namespace[name] != func:
+        if lookup_in_namespace(name,namespace) != func:
             return
-    except KeyError:
+    except (KeyError,AttributeError):
         return
     #  The function to be inlined into should be executing at depth 3.
     #  If it's not there or not a function, bail out.
@@ -162,8 +187,8 @@ def _inlineme(func):
     if name is None:
         return
     try:
-        caller = namespace[name]
-    except KeyError:
+        caller = lookup_in_namespace(name,namespace)
+    except (KeyError,AttributeError):
         return
     if type(caller) != type(_inlineme):
         return
@@ -172,44 +197,40 @@ def _inlineme(func):
     if frame.f_code != code:
         return
     #  Grab the bytecode up to call of target function.
-    new_code = new.code(0, code.co_nlocals,
-                           code.co_stacksize, code.co_flags,
-                           code.co_code[:frame.f_lasti+3], code.co_consts,
-                           code.co_names, code.co_varnames,
-                           code.co_filename, "",
-                           frame.f_lineno, code.co_lnotab)
-    c = Code.from_code(new_code)
-    c.code[:] = [op for op in c.code if op[0] != SetLineno]
+    (c,callsite) = make_code_from_frame(frame)
     #  Double-check that we're inlining at the site of a CALL_FUNCTION.
-    if c.code[-1][0] != CALL_FUNCTION:
+    if c.code[callsite][0] != CALL_FUNCTION:
         return
-    callsite = len(c.code)
     #  Skip backwards over loading of arguments, to find the site where
     #  the target function is loaded.
-    numargs = c.code[-1][1]
-    idx = -2
+    numargs = c.code[callsite][1]
+    loadsite_end = callsite - 1
     while numargs > 0:
-        (npop,npush) = getse(*c.code[idx])
+        (npop,npush) = getse(*c.code[loadsite_end])
         while npush - npop != 1:
-            idx -= 1
-            npop += getse(*c.code[idx])[0]
-            npush += getse(*c.code[idx])[1]
+            loadsite_end -= 1
+            npop += getse(*c.code[loadsite_end])[0]
+            npush += getse(*c.code[loadsite_end])[1]
         numargs -= 1
-        idx -=1
-    loadsite = len(c.code) + idx + 1
+    #    loadsite_end -=1
+    loadsite_start = loadsite_end - 1
+    while c.code[loadsite_start][0] in (LOAD_ATTR,):
+        loadsite_start -= 1
     #  Give new names to the locals in the source bytecode
     source_code = Code.from_code(func.func_code)
     dest_code = Code.from_code(caller.func_code)
     name_map = _rename_local_vars(source_code)
-    #  Remove any setlineno ops from the source bytecode.
+    #  Remove any setlineno ops from the source and dest bytecode.
     #  Also remove 4-code stub that calls into _inlineme.
-    new_code = [c for c in source_code.code if c[0] != SetLineno]
+    new_code = [op for op in source_code.code if op[0] != SetLineno]
     source_code.code[:] = new_code[4:]
-    new_code = [c for c in dest_code.code if c[0] != SetLineno]
+    new_code = [op for op in dest_code.code if op[0] != SetLineno]
     dest_code.code[:] = new_code
     #  Pop the function arguments directly from the stack.
     #  Keyword args are currently not supported.
     numargs = dest_code.code[callsite][1] & 0xFF
+    if numargs != dest_code.code[callsite][1]:
+        return
     for i in xrange(numargs):
         argname = func.func_code.co_varnames[i]
         source_code.code.insert(0,(STORE_FAST,name_map[argname]))
@@ -231,7 +252,7 @@ def _inlineme(func):
         #  Replace the callsite with the inlined code,
         #  and remove loading of original function.
         dest_code.code[callsite:callsite+1] = source_code.code
-        del dest_code.code[loadsite]
+        del dest_code.code[loadsite_start:loadsite_end]
     #  An simple optimisation pass would be awsome here, the above
     #  generates a lot of redundant loads, stores and jumps.
     caller.func_code = dest_code.to_code()
@@ -277,4 +298,13 @@ def _rename_local_vars(code):
                 name_map[arg] = newarg
             code.code[i] = (op,newarg)
     return name_map
+
+
+def lookup_in_namespace(name,namespace):
+    """Resolve a dotted name into an object, using given namespace."""
+    bits = name.split(".")
+    obj = namespace[bits[0]]
+    for attr in bits[1:]:
+        obj = getattr(obj,attr)
+    return obj
 
