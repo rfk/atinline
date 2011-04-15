@@ -17,6 +17,9 @@ class Test_Correctness(unittest.TestCase):
             for item in items:
                 total += calculate(item)
             return total
+        aggregate([1])
+        def calculate(a):
+            raise ValueError("failed to inline")
         for i in xrange(20):
             self.assertEquals(aggregate(xrange(i)),
                               sum(2*a+1 for a in xrange(i)))
