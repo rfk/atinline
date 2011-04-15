@@ -219,7 +219,10 @@ def _inlineme(func):
     #  Give new names to the locals in the source bytecode
     source_code = Code.from_code(func.func_code)
     dest_code = Code.from_code(caller.func_code)
-    name_map = _rename_local_vars(source_code)
+    try:
+        name_map = _rename_local_vars(source_code,func)
+    except ValueError:
+        return
     #  Remove any setlineno ops from the source and dest bytecode.
     #  Also remove 4-code stub that calls into _inlineme.
     new_code = [op for op in source_code.code if op[0] != SetLineno]
@@ -279,12 +282,18 @@ def new_name(name=None):
         return "_inlined_var%s_%s" % (_ids.next(),name,)
 
 
-def _rename_local_vars(code):
+def _rename_local_vars(code,func):
     """Rename the local variables in the given code to new unique names.
 
-    This basically just changes LOAD_FAST, STORE_FAST and DELETE_FAST targets
-    with new names, and helpfully returns a dictionary mapping old names to
-    new names.
+    This adjusts name references inside the given code so that they're
+    valid no matter where the code is executed from.  The following surgery
+    is performed:
+
+        * local variables are simply renamed to something unique, and
+          the mapping from old to new names is returned.
+        * global variables are modified to explicit operations on the
+          global dictionary of the provided function
+        * closure variables or by-name lookups cause a ValueError
     """
     name_map = {}
     for nm in code.to_code().co_varnames:
@@ -297,6 +306,12 @@ def _rename_local_vars(code):
                 newarg = new_name(arg)
                 name_map[arg] = newarg
             code.code[i] = (op,newarg)
+        elif op == LOAD_GLOBAL:
+            code.code[i] = (BINARY_SUBSCR,None)
+            code.code.insert(i, (LOAD_CONST,arg))
+            code.code.insert(i, (LOAD_CONST,func.func_globals))
+        elif op in (LOAD_DEREF,STORE_DEREF,LOAD_NAME,STORE_NAME,DELETE_NAME,):
+            raise ValueError("can't modify name reference")
     return name_map
 
 

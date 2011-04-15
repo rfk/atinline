@@ -25,9 +25,6 @@ class Test_Correctness(unittest.TestCase):
         def call_inlined_add_to_total(x):
             return atinline.tests.add_to_running_total(x)
         for i in xrange(20):
-            import dis
-            print "-------"
-            dis.dis(call_inlined_add_to_total)
             self.assertEquals(call_inlined_add_to_total(i),
                               atinline.tests.running_total)
 
