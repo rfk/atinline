@@ -156,7 +156,7 @@ def find_caller(depth):
         loadsite -= 1
     if c.code[loadsite][0] in (LOAD_GLOBAL,LOAD_NAME,):
         return (frame,frame.f_globals,c.code[loadsite][1] + name)
-    if c.code[loadsite][0] in (LOAD_FAST,):
+    if c.code[loadsite][0] in (LOAD_FAST,LOAD_DEREF,):
         return (frame,frame.f_locals,c.code[loadsite][1] + name)
     return (None,None,None)
 
