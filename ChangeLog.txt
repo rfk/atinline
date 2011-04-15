@@ -1,4 +1,13 @@
 
+v0.1.1:
+
+    * Much more robust callsite detection and code snipping.
+    * Support inlining functions that use global variables.
+    * Support inlining functions loaded from the containing closure.
+    * Remember failed inline attempts, don't retry them over and over.
+    * Add a couple of corretness tests.
+
+
 v0.1.0:
 
     * Initial version; you might say *everything* has changed.

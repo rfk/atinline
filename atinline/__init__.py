@@ -63,7 +63,7 @@ module, which is atinline's only dependency.
 
 __ver_major__ = 0
 __ver_minor__ = 1
-__ver_patch__ = 0
+__ver_patch__ = 1
 __ver_sub__ = ""
 __version__ = "%d.%d.%d%s" % (__ver_major__,__ver_minor__,__ver_patch__,__ver_sub__)
 
@@ -72,6 +72,7 @@ import sys
 import new
 import timeit
 import dis
+import weakref
 from dis import HAVE_ARGUMENT, findlabels
 from byteplay import *
 
@@ -83,7 +84,7 @@ def inline(func):
     the bytecode of any function that calls them.  Like a parasite.
     """
     #  The magic is all done by the _inlineme helper function.
-    #  We add a little loader at the top of func's bytecod that
+    #  We add a little loader at the top of func's bytecode that
     #  calls _inlineme with the appropriate arguments.
     c = Code.from_code(func.func_code)
     c.code.insert(0,(LOAD_CONST,_inlineme))
@@ -161,7 +162,9 @@ def find_caller(depth):
     return (None,None,None)
 
 
-_ALREADY_INLINED = set()
+
+_ALREADY_INLINED = weakref.WeakKeyDictionary()
+
 
 def _inlineme(func):
     """Helper function to inline code at its call site.
@@ -190,7 +193,7 @@ def _inlineme(func):
     (frame,namespace,name) = find_caller(2)
     if name is None:
         return
-    if (caller,frame.f_lasti) in _ALREADY_INLINED:
+    if frame.f_lasti in _ALREADY_INLINED.get(caller,[]):
         return
     try:
         if lookup_in_namespace(name,namespace) != func:
@@ -200,13 +203,13 @@ def _inlineme(func):
     #  Verify that the code we're inlining is the code being executed.
     code = caller.func_code
     if frame.f_code != code:
-        _ALREADY_INLINED.add((caller,frame.f_lasti))
+        _ALREADY_INLINED.setdefault(caller,[]).append(frame.f_lasti)
         return
     #  Grab the bytecode for callsite of target function.
     (c,callsite) = make_code_from_frame(frame)
     #  Double-check that we're inlining at the site of a CALL_FUNCTION.
     if c.code[callsite][0] != CALL_FUNCTION:
-        _ALREADY_INLINED.add((caller,frame.f_lasti))
+        _ALREADY_INLINED.setdefault(caller,[]).append(frame.f_lasti)
         return
     #  Skip backwards over loading of arguments, to find the site where
     #  the target function is loaded.
@@ -229,10 +232,10 @@ def _inlineme(func):
     try:
         name_map = _rename_local_vars(source_code,func)
     except ValueError:
-        _ALREADY_INLINED.add((caller,frame.f_lasti))
+        _ALREADY_INLINED.setdefault(caller,[]).append(frame.f_lasti)
         return
     #  Remove any setlineno ops from the source and dest bytecode.
-    #  Also remove 4-code stub that calls into _inlineme.
+    #  Also remove 4-code preamble that calls into _inlineme.
     new_code = [op for op in source_code.code if op[0] != SetLineno]
     source_code.code[:] = new_code[4:]
     new_code = [op for op in dest_code.code if op[0] != SetLineno]
@@ -241,7 +244,7 @@ def _inlineme(func):
     #  Keyword args are currently not supported.
     numargs = dest_code.code[callsite][1] & 0xFF
     if numargs != dest_code.code[callsite][1]:
-        _ALREADY_INLINED.add((caller,frame.f_lasti))
+        _ALREADY_INLINED.setdefault(caller,[]).append(frame.f_lasti)
         return
     for i in xrange(numargs):
         argname = func.func_code.co_varnames[i]
@@ -268,7 +271,7 @@ def _inlineme(func):
     #  An simple optimisation pass would be awsome here, the above
     #  generates a lot of redundant loads, stores and jumps.
     caller.func_code = dest_code.to_code()
-    _ALREADY_INLINED.add((caller,frame.f_lasti))
+    _ALREADY_INLINED.setdefault(caller,[]).append(frame.f_lasti)
  
 
 def _ids():
